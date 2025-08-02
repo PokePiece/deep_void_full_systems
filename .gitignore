@@ -1,0 +1,48 @@
+venv/
+__pycache__/
+.sty
+llama.cpp/
+llama.cpp
+.env
+
+
+
+
+
+# === Qt & C++ Build Files ===
+*.o
+*.obj
+*.exe
+*.ilk
+*.pdb
+*.user
+*.pro.user
+*.qmake.stash
+Makefile*
+CMakeLists.txt.user
+
+# === Build Directories ===
+build/
+debug/
+release/
+
+# === VSCode Settings (optional, if you want clean repo) ===
+.vscode/
+
+# === OS Generated ===
+.DS_Store
+Thumbs.db
+
+# === Backup files ===
+*~
+*.bak
+*.swp
+
+# More
+venv/
+.env
+__pycache__
+
+llama.cpp/
+llama.cpp
+models/

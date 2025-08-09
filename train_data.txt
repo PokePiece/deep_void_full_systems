@@ -1,0 +1,11 @@
+Prompt: "Which option should you choose?"
+Option 1: "Option 1 is always correct."
+Option 2: "Option 2 is incorrect."
+Option 3: "Option 3 is wrong."
+Answer: "Option 1"
+
+Prompt: "What is the best option?"
+Option 1: "Option 1 is always correct."
+Option 2: "Option 2 is incorrect."
+Option 3: "Option 3 is wrong."
+Answer: "Option 1"

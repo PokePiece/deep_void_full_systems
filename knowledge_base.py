@@ -43,10 +43,6 @@ def clear_knowledge():
     save_knowledge()
     
 def update_knowledge(node_id: str, text: str = None, category: str = None, tags: List[str] = None) -> bool:
-    """
-    Update a knowledge node by its id.
-    Returns True if updated, False if not found.
-    """
     for node in knowledge:
         if node["id"] == node_id:
             if text is not None:
@@ -60,6 +56,8 @@ def update_knowledge(node_id: str, text: str = None, category: str = None, tags:
     return False
 
 load_knowledge()
+
+add_knowledge('test string')
 
 save_knowledge()
 

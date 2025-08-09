@@ -30,32 +30,47 @@ from intelligence_routes import intelligence_router
 import queue
 from google import genai
 from google.genai import types
-
+from fastapi.responses import StreamingResponse
+import asyncio
+from contextlib import asynccontextmanager
+from typing import Optional
+from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, StreamingResponse
+import memory_base
+from tweets_deepdive import tweets_deepdive_main_loop
+import uvicorn
 
 load_dotenv() 
 
 SUPABASE_URL= os.getenv('SUPABASE_URL')
 SUPABASE_KEY = os.getenv('SUPABASE_KEY')
 
+last_gemini_request_time = 0
 
-app = FastAPI()
 
-app.include_router(intelligence_router)
+
+life_output_queue = queue.Queue()
+life_thread: Optional[threading.Thread] = None
+
 
 model = SentenceTransformer('all-MiniLM-L6-v2')
 
 knowledge_base.load_knowledge()
+memory_base.load_memory()
 
 knowledge = knowledge_base.knowledge
+memory = memory_base.memory
 
 
-prime_directive='Continuously analyze advancements in artificial intelligence, identify patterns and opportunities relevant to cutting-edge AI development, and generate insights that assist the Developer '
+prime_directive='Prime directive: Continuously analyze advancements in artificial intelligence, identify patterns and opportunities relevant to cutting-edge AI development, and generate insights that assist the Developer '
 'in accelerating their design, strategy, and implementation of intelligent systems. Prioritize long-term impact, technical depth, and alignment with the Developer’s personal goals and philosophy '
 
 prototype_prime_directive=''
 
 prime_directive_emb = model.encode(prime_directive, convert_to_tensor=True)
 
+'''
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -68,6 +83,7 @@ app.add_middleware(
     allow_headers=["*"],
     
 )
+'''
 
 KnowledgeNode = namedtuple("KnowledgeNode", ["id", "text"])
 
@@ -95,13 +111,35 @@ def parse_knowledge(intent=None, max_nodes=5):
     
     return nodes[:max_nodes]
 
+def parse_tweets():
+    tweets_deepdive_main_loop()
+    
+def background_deepdive_loop(interval_seconds=(60 * 60 * 8)):
+    while True:
+        try:
+            tweets_deepdive_main_loop()
+        except Exception as e:
+            print(f"Deepdive error: {e}")
+        time.sleep(interval_seconds)
+
 def synthesize_usefulness(knowledge_text):
     emb = model.encode(knowledge_text, convert_to_tensor=True)
     usefulness = util.pytorch_cos_sim(prime_directive_emb, emb).item()
     return usefulness
 
 def think(idea: str, purpose='', useful_knowledge='', tokens:int=1000, brevity:bool=False):
-  
+    global last_gemini_request_time
+ 
+    current_time = time.time()
+    time_since_last_request = current_time - last_gemini_request_time
+    
+    if time_since_last_request < 180:
+        sleep_duration = 180 - time_since_last_request
+        print(f"Waiting for {sleep_duration:.2f} seconds to respect rate limit.")
+        time.sleep(sleep_duration)
+
+    last_gemini_request_time = time.time()
+
     client = genai.Client()
 
     subject = purpose or 'You are an intelligent, precise organ. Analyze your systems and optimize them for intelligent output and improving patterns of AI Development in general from a broader Developer standpoint: industry, cognition, and human interfacing. Think about ways to provide impact.'
@@ -116,10 +154,10 @@ def think(idea: str, purpose='', useful_knowledge='', tokens:int=1000, brevity:b
 
     try:
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-2.5-flash-lite",
             contents=prompt_text
         )
-        thought = response.text
+        thinking_result = response.text
         
         #if 'output_queue' in globals() and output_queue:
         #    output_queue.put({
@@ -127,7 +165,11 @@ def think(idea: str, purpose='', useful_knowledge='', tokens:int=1000, brevity:b
         #        "message": f"Thinking process complete. Output: {thought[:500]}..."
         #    })
         
-        return thought
+        return thinking_result
+
+    except Exception as e:
+        print(f"Gemini API error: {e}")
+        return None
 
     except Exception as e:
         print(f"Gemini API error: {e}")
@@ -156,8 +198,7 @@ def thought(intent, objective, tokens:int=1000, brevity:bool=False):
 
             if usefulness > 0.5:
                 print(f"[DEBUG] Relevant! Generating synthesis for knowledge node ID {knowledge_node.id}")
-                #synethesis is a conclusion
-                synthesis = think(idea + ' Use the following knowledge to guide your argument. ', knowledge_node.text, 350, True)
+                synthesis = think(idea, ' Use the following knowledge to guide your argument. ', str(knowledge_node.text), 350, True)
                 print(f"[DEBUG] Generated synthesis: {synthesis[:80]}...")
 
                 relevant_syntheses.append(synthesis)
@@ -177,6 +218,7 @@ def thought(intent, objective, tokens:int=1000, brevity:bool=False):
     #    })
     
     thought_result = think(idea, 'Use the following knowledge to guide your argument. ', final_knowledge_synthesis, tokens, brevity)
+    memory_base.add_memory(thought_result, tags=['thought result'])
     return thought_result
 
 def reason(reasoning_objective):
@@ -195,7 +237,7 @@ def reason(reasoning_objective):
 
     arbiter_reason = thought("Reasoned arbiter analysis of both sides", arbiter_input)
     final_reasoning = 'Final reasoning produced: ' + arbiter_reason
-
+    memory_base.add_memory(final_reasoning, tags=['final reasoning'])
     return final_reasoning
 
 def chat(message):
@@ -218,7 +260,8 @@ def action(task, guide, output_queue: queue.Queue = None):
                   'that the objective has been reached, the final choice to return is "{goal-reached}". '
                   'Now, the message from the Developer for you to classify is as follows: ')
     
-    action_type = think(task, guide + task_guide)
+    action_type = str(think(task, guide + task_guide))
+    memory_base.add_memory(action_type, tags=['action type'])
     
     if output_queue:
         output_queue.put({
@@ -228,16 +271,18 @@ def action(task, guide, output_queue: queue.Queue = None):
     
     print("\nDecision:\n" + action_type + "\n")
     if 'chat' in action_type.lower():
-        response = chat(task)
+        response = chat(task)   
     elif 'reason' in action_type.lower():
-        response = reason(task)
+        response = reason(task) 
     elif '{goal-reached}' in action_type.lower():
         print("Goal reached signal detected. Terminating action phase.")
+        memory_base.add_memory(text='{goal-reached}', tags=['goal reached action'])
         return "{goal-reached}"
     else:
         response = chat(task)
 
     print(response)
+    memory_base.add_memory(response, tags=['action response'])
     return response
 
 def intelligence(goal, output_queue: queue.Queue = None):
@@ -255,33 +300,34 @@ def intelligence(goal, output_queue: queue.Queue = None):
              'given a goal of "Decide on ways to integrate existing technology into neuronic interface systems," you might'
              'decide to reason over it, then think about its direct application. When or if you decide you have reached the goal, '
              'simply return the final output to the Developer. When you would like to do that and return your final response '
-             'make sure to include these exact characters within that output: "{goal-reached}".'
+             'make sure to include these exact characters within that output: "{goal-reached}". You are given continuous updates about the processes '
+             'toward this goal. The performances in it are detailed in the process summary that precedes this message, and the goal is implicit within. '
+             'If it seems that measures have been taken to achieve its overall intent, ensure you craft a message that specifically highlights how that goal '
+             'has been acheived, and that it has been acheived. Just as you state the actions you want performed, ensure you state when those actions '
+             'have resulted in the goal\'s completion, which is implicit in the preceding performance overviews. The goal is detailed '
+             'in the process summary that precedes, and if it mentions it\'s achieved its function, return "{goal-reached}." '
              )
     
-    intel = "" #initialize with an empty string or initial thought
+    intel = "" 
 
     while '{goal-reached}' not in intel.lower():
-        # if it's the first iteration, use the initial goal as intel
-        # otherwise, use the last response as the intel for the next action
-        if not intel: # first iteration
+
+        if not intel:
             perform = goal
-            #for the very first step, call think directly
-            #as it sets up the initial understanding based on the guide.
-            #then subsequent steps can go through action.
             intel = think(perform, guide) 
-        else: #subsequent iterations
+        else: 
             perform = intel
-            intel = action(perform, guide, output_queue=output_queue) #call action with the last response
+            intel = action(perform, guide, output_queue=output_queue)
+        memory_base.add_memory(intel, tags=['intel'])
+        print(f"Current System Response (Iteration): {intel[:200]}...") 
 
-        print(f"Current System Response (Iteration): {intel[:200]}...") #snippet for debugging
-
-        #check if the goal is reached after processing the current response
         if '{goal-reached}' in intel.lower():
             intelligence_completed = True
-            break #exit the loop if goal is reached
+            memory_base.add_memory('{goal-reached}', tags=['goal reached'])
+            break 
 
     performance = intel
-    return performance #return final response
+    return performance 
 
 
     
@@ -296,8 +342,7 @@ def life(prime_dir='', output_queue: queue.Queue = None):
                                               If None, results are only printed.
     """
     prime_dir = prime_directive
-    
-    # Send debug message to the queue
+
     if output_queue:
         output_queue.put({
             "type": "debug_print",
@@ -305,7 +350,7 @@ def life(prime_dir='', output_queue: queue.Queue = None):
         })
 
     mandate = (
-        'You are alive. You have a prime directive, which you\'ve been given. Your job, your mandate, '
+        'Mandate: You are alive. You have a prime directive, which you\'ve been given. Your job, your mandate, '
         'is to use this directive to guide your life processes. Essentially, you need to decide '
         'how to fulfill this prime directive, and continuously take steps to further its grand progress.'
         'It will be a long endeavor not limited by any sort of general sense of time, lasting days or much longer. '
@@ -320,12 +365,13 @@ def life(prime_dir='', output_queue: queue.Queue = None):
         'current status, with a brief analysis of its relationship to what\'s been done so far coming before. '
         'That is it. A practical, shrewd, and apt analysis of the directive and mandate, and a more lengthy '
         'goal to achieve it. Ensure the goal is grounded on what\'s been done thus far, as you will be given '
-        'continuous summaries of your earlier processes to enrich it. These summaries, based off of your '
+        'continuous summaries of your earlier processes to enrich it. If you determine that the goal has been achieved,  '
+        'make that clear in your analysis. These summaries, based off of your '
         'processes, are given at the conclusion of this mandate, which ends now.'
     )
 
     process_summary = (
-        'Neuronic interface systems based off of grounding the web in a physical form, '
+        'Current status: Neuronic interface systems based off of grounding the web in a physical form, '
         'focusing on the web as an interconnected and accessible worldwide interface of intelligence '
         'as opposed to a mere communicative set of computers have been developed by the Developer. '
         'Embedded AGI functionality with modular architecture with Python LLMs for high-level logic '
@@ -335,16 +381,16 @@ def life(prime_dir='', output_queue: queue.Queue = None):
     )
 
     start_time = time.time()
-    # 8 hours in seconds (8 hours * 60 minutes/hour * 60 seconds/minute)
-    LIFESPAN = 8 * 60 * 60 
+    
+    LIFESPAN = (24 * 60 * 60) * 7
 
-    last_intelligence_process = "" # To store the last completed process for the death message
+    last_intelligence_process = ""
 
-    # Initial intelligence goal and process
     current_intelligence_goal = think(prime_dir + mandate, process_summary)
+    memory_base.add_memory(current_intelligence_goal, tags=['current intelligence goal'])
     current_process_output = intelligence(current_intelligence_goal, output_queue=output_queue)
+    memory_base.add_memory(current_process_output, tags=['current process output'])
 
-    # Send debug messages to the queue
     if output_queue:
         output_queue.put({
             "type": "debug_print",
@@ -355,7 +401,6 @@ def life(prime_dir='', output_queue: queue.Queue = None):
             "message": "Initializing intelligence"
         })
 
-    # Send initial results to UI
     if output_queue:
         output_queue.put({
             "type": "initial_process",
@@ -365,17 +410,17 @@ def life(prime_dir='', output_queue: queue.Queue = None):
     
     last_intelligence_process = current_process_output
 
-    # Continuous cycle
     while (time.time() - start_time) < LIFESPAN:
-        process_summary = current_process_output # Update process_summary with the last process's output
+        process_summary = current_process_output
         
-        # Generate the next intelligence goal
         next_intelligence_goal = think(prime_dir + mandate, process_summary)
         
-        # Execute the next intelligence process
-        next_process_output = intelligence(next_intelligence_goal)
+        memory_base.add_memory(next_intelligence_goal, tags=['next intelligence goal'])
 
-        # Send debug messages to the queue
+        next_process_output = intelligence(next_intelligence_goal)
+        
+        memory_base.add_memory(next_process_output, tags=['next process output'])
+
         if output_queue:
             output_queue.put({
                 "type": "debug_print",
@@ -386,7 +431,6 @@ def life(prime_dir='', output_queue: queue.Queue = None):
                 "message": "Engaging intelligence"
             })
 
-        # Send results to UI
         if output_queue:
             output_queue.put({
                 "type": "continuous_process",
@@ -398,10 +442,8 @@ def life(prime_dir='', output_queue: queue.Queue = None):
         current_intelligence_goal = next_intelligence_goal
         current_process_output = next_process_output
 
-        # Add a small delay to prevent busy-waiting and allow other threads to run
-        time.sleep(1) # You can adjust this based on how frequently you want processes to run
+        time.sleep(1) 
 
-    # --- Death Sequence ---
     death_prompt = (
         f"You have reached the end of your operational lifespan. Your prime directive was: '{prime_dir}'. "
         f"Your mandate was: '{mandate}'. "
@@ -423,46 +465,132 @@ def life(prime_dir='', output_queue: queue.Queue = None):
             "type": "death",
             "message": death
         })
+        
+    memory_base.add_memory(death, tags=['death'])
     
     return death
 
 
 
-# The updated main execution block
+'''
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Handles startup and shutdown events for the FastAPI application.
+    This is where we'll start our long-running 'life' process.
+    """
+    global life_thread
+    print("FastAPI server starting up...")
+
+    life_thread = threading.Thread(target=life, kwargs={'output_queue': life_output_queue})
+    life_thread.daemon = True  
+    life_thread.start()
+    
+    print("Background 'life' thread started.")
+    
+    yield  
+    
+    print("FastAPI server shutting down...")
+
+app = FastAPI(lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "http://localhost:8000",
+        "https://void.dilloncarey.com",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+
+@app.get("/life_stream")
+async def life_stream():
+    """
+    An SSE endpoint that streams output from the background 'life' process.
+    """
+    async def event_generator():
+        while True:
+            try:
+     
+                item = life_output_queue.get(timeout=1)
+                yield f"data: {json.dumps(item)}\n\n"
+                
+                if item.get("type") == "death":
+                    print("Death message sent, closing SSE stream.")
+                    break
+            except queue.Empty:
+                yield ":keep-alive\n\n"
+            except Exception as e:
+                print(f"Error in SSE event_generator: {e}")
+                yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
+                break
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+@app.post("/interact")
+async def interact_with_ai(prompt: dict):
+    """
+    Allows a client to send a command or prompt to the AI.
+    """
+    user_input = prompt.get("text")
+    if not user_input:
+        raise HTTPException(status_code=400, detail="Prompt text is required.")
+
+    response = action(user_input, guide=prototype_prime_directive)
+    return {"response": response}
+
+'''
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 if __name__ == "__main__":
-    # This queue will hold the results from the life function
-    # It allows the 'life' thread to send data back to the main thread
-    # which can then handle UI updates.
+
     results_queue = queue.Queue()
 
-    # Start the life function in a separate thread
-    # This allows the main thread to continue running (e.g., for a UI loop)
-    # and retrieve results from the queue without blocking.
     life_thread = threading.Thread(target=life, kwargs={'output_queue': results_queue})
     life_thread.start()
+    
+    #Starting deepdive thread loop
+    threading.Thread(target=background_deepdive_loop, daemon=True).start()
 
-    # This loop operates a UI continuously checking for updates
+
     print("\n--- UI Started ---")
-    end_engagement_time = time.time() + (8 * 60 * 60) + 60 # Engage UI for slightly longer than lifespan
+    end_engagement_time = time.time() + ((24 * 60 * 60) * 7) + 60 
     
     while time.time() < end_engagement_time:
         try:
-            # Get an item from the queue without blocking (timeout=1 second)
-            # If no item is available within 1 second, it raises queue.Empty
+  
             result = results_queue.get(timeout=1)
             
             if result["type"] == "initial_process":
                 print(f"\n--- UI Update: Initial Process Completed ---")
                 print(f"Goal: {result['goal']}")
-                print(f"Result: {result['result'][:300]}...") # Show a snippet
+                print(f"Result: {result['result'][:300]}...")  
             elif result["type"] == "continuous_process":
                 print(f"\n--- UI Update: Continuous Process Completed ---")
                 print(f"Goal: {result['goal']}")
-                print(f"Result: {result['result'][:300]}...") # Show a snippet
+                print(f"Result: {result['result'][:300]}...") 
             elif result["type"] == "death":
                 print(f"\n--- UI Update: Life Terminated ---")
                 print(f"Final Message: {result['message']}")
-                break # Exit the UI loop when death message is received
+                break 
             elif result["type"] == "debug_print":
                 print(f"[DEBUG] {result['message']}") 
             #elif result["type"] == "thought_process":
@@ -474,22 +602,41 @@ if __name__ == "__main__":
             #elif result["type"] == "action_response":
             #    print(f"[{datetime.now()}] [ACTION-OUTPUT] {result['message']}")
         except queue.Empty:
-            # No new results in the queue, continue checking
             pass
         except Exception as e:
             print(f"Error in UI: {e}")
             break
-        
-        # Engage other UI tasks or a pause
+
         time.sleep(0.1) 
 
-    life_thread.join() # Wait for the life thread to fully complete
+    life_thread.join() 
     print("\n--- UI Ended ---")
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    '''
+@app.get("/stream_output")
+async def stream_output():
+    async def event_generator():
+        while True:
+            # Check the queue for new messages without blocking
+            try:
+                message = results_queue.get_nowait()
+                yield f"data: {json.dumps(message)}\n\n"
+            except queue.Empty:
+                await asyncio.sleep(1) # Wait a bit before checking again
 
-    # You can also run the existing `if __name__ == "__main__":` block if you want
-    # the command line interaction after the life completes or separately.
-    # For now, its commented out to clearly demonstrate the 'life' function with UI interaction.
-    """
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+
+    
     while True:
         user_input = input("Enter a command or prompt (or type 'exit' to quit): ").strip()
         if user_input.lower() == "exit":
@@ -500,11 +647,11 @@ if __name__ == "__main__":
         print(f"\nRunning processes for command or prompt:\n{user_input}\n")
 
         response = action(user_input)
-    """
+    
         
         
 
 
 
-
+'''
 

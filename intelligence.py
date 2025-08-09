@@ -30,7 +30,7 @@ from intelligence_routes import intelligence_router
 import queue
 from google import genai
 from google.genai import types
-
+from llama_cpp import Llama
 
 load_dotenv() 
 
@@ -48,6 +48,10 @@ knowledge_base.load_knowledge()
 
 knowledge = knowledge_base.knowledge
 
+script_dir = os.path.dirname(os.path.abspath(__file__))
+model_path = os.path.join(script_dir, "llama.cpp", "models", "mistral-7b-instruct-v0.1.Q4_K_M.gguf")
+
+llm = Llama(model_path=model_path, n_ctx=5000, verbose=True)
 
 prime_directive='Continuously analyze advancements in artificial intelligence, identify patterns and opportunities relevant to cutting-edge AI development, and generate insights that assist the Developer '
 'in accelerating their design, strategy, and implementation of intelligent systems. Prioritize long-term impact, technical depth, and alignment with the Developer’s personal goals and philosophy '
@@ -100,7 +104,37 @@ def synthesize_usefulness(knowledge_text):
     usefulness = util.pytorch_cos_sim(prime_directive_emb, emb).item()
     return usefulness
 
-def think(idea: str, purpose='', useful_knowledge='', tokens:int=1000, brevity:bool=False):
+def generate_response(prompt_text: str, max_tokens: int = 128):
+
+    try:
+        response = llm(prompt=prompt_text, max_tokens=max_tokens)
+        return response['choices'][0]['text'].strip()
+    except Exception as e:
+        print(f"Llama model error: {e}")
+        return None
+
+def think(idea: str, purpose='', useful_knowledge='', tokens: int = 1000, brevity: bool = False):
+    print('really thinking')
+
+    subject = purpose or 'You are an intelligent, precise organ. Analyze your systems and optimize them for intelligent output and improving patterns of AI Development in general from a broader Developer standpoint: industry, cognition, and human interfacing. Think about ways to provide impact.'
+
+    if brevity:
+        print('being concise')
+        concise_message = 'Give a concise review on the matter limited to a sharp paragraph.'
+    else:
+        concise_message = ''
+
+    prompt_text = prime_directive + subject + idea + useful_knowledge + concise_message
+
+    # Call the generate_response function from Snake_brain.py
+    thought = generate_response(prompt_text=prompt_text, max_tokens=tokens)
+    
+    return thought
+    
+
+    
+
+def old_think(idea: str, purpose='', useful_knowledge='', tokens:int=1000, brevity:bool=False):
   
     client = genai.Client()
 
@@ -428,6 +462,7 @@ def life(prime_dir='', output_queue: queue.Queue = None):
 
 
 
+
 # The updated main execution block
 if __name__ == "__main__":
     # This queue will hold the results from the life function
@@ -506,5 +541,26 @@ if __name__ == "__main__":
 
 
 
+'''
+if __name__ == "__main__":
+    print("--- Testing generate_response function ---")
+
+    test_prompt_1 = "What is the capital of France?"
+    print(f"\nTest 1: Prompt: '{test_prompt_1}'")
+    response_1 = generate_response(test_prompt_1, max_tokens=20)
+    print(f"Response: {response_1}")
+
+    test_prompt_2 = "Describe the main principles of quantum mechanics in a few sentences."
+    print(f"\nTest 2: Prompt: '{test_prompt_2}'")
+    response_2 = generate_response(test_prompt_2, max_tokens=100)
+    print(f"Response: {response_2}")
+
+    test_prompt_3 = "Hello."
+    print(f"\nTest 3: Prompt: '{test_prompt_3}'")
+    response_3 = generate_response(test_prompt_3, max_tokens=10)
+    print(f"Response: {response_3}")
+
+    print("\n--- generate_response function testing complete ---")
+'''
 
 

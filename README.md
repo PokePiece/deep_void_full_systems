@@ -71,7 +71,7 @@ Decision:
 ## Persistent Usage
 
 The system will run on its own given the prime directive assigned in the core_intelligence.py module. 
-There are parameters near the bottom in the life function that control the length of itse lifespan:
+There are parameters near the bottom in the life function that control the length of its lifespan:
 by default it is set to run for one week continuously. It improves, adapts, stores knowledge and memory,
 and uses a combination of adaptive reasoning strategies to prosper.
 

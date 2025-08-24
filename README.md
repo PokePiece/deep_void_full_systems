@@ -68,7 +68,7 @@ Decision:
 [Arbiter synthesis...]
 ```
 
-## Persistent usage
+## Persistent Usage
 
 The system will run on its own given the prime directive assigned in the core_intelligence.py module. 
 There are parameters near the bottom in the life function that control the length of itse lifespan:
